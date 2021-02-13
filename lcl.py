@@ -24,8 +24,13 @@ MAX_BAR_LENGTH = 16
 lcjson = None
 lcd = None
 lcm = None
-loaded_lcmusic_index = 0
-
+loaded_lcmusic_index = None
+loaded_channels = None
+loaded_pages = None
+loaded_to_tail = None
+music_play_start_bar = None
+used_sound_list = []
+played_page_loop_setting = False
 
 # Lovely Composer Data Class -------------------------
 
@@ -509,6 +514,10 @@ class LCChannelList(MutableSequence):
     def get_voice(self, ch, bar, tick):
         sl = self.channels[ch]
         return sl.get_voice(bar, tick)
+    
+    def get_lcsound(self, ch, bar):
+        sl = self.channels[ch]
+        return sl[bar]
 
     def clear(self):
         for sl in self.channels:
@@ -636,6 +645,9 @@ class LCMusic:
 
     def get_voice(self, ch, bar, tick):
         return self.channels.get_voice(ch, bar, tick)
+    
+    def get_lcsound(self, ch, bar):
+        return self.channels.get_lcsound(ch, bar)
 
     @property
     def ch(self, index):
@@ -969,6 +981,17 @@ def get_loaded_lcmusic_index() -> int:
     return loaded_lcmusic_index
 
 
+def get_target_sound_id(ch_id, bar:int):
+    if ch_id >= loaded_channels:    # 指定の小節が実際サウンドに読み込まれてない場合
+        return False
+    
+    id = bar * loaded_channels + ch_id
+    if loaded_to_tail:
+        id += _get_start_index_for_tail(loaded_channels, loaded_pages, music_play_start_bar)
+
+    return id
+
+
 def get_note_num(key_name:str, standard_notation:bool=False):
 
     if type(key_name) is not str:
@@ -1085,15 +1108,6 @@ def get_scaled_note(note:int, scale_key_list:list):
     return n
 
 
-def get_sound_state():
-    s = ""
-    for key,snd in pyxel._sound_bank.items():
-        t = "LCL used"  if isinstance(snd, lcl.ExSound) else ""
-        t +=  " " + str(snd.__class__)
-        s += "sound({}): {}\n".format(key, t)
-    return s
-
-
 def mixing_note(un, cn):
     #if un["note"] is not None and un["note"] >= 0 or (un["note"]==-1 and cn["note"]is None or cn["note"]):
     if un["note"] is not None and un["note"] >= 0:
@@ -1101,6 +1115,15 @@ def mixing_note(un, cn):
     else:
         return cn
 
+
+
+def get_sound_state():
+    s = ""
+    for key,snd in pyxel._sound_bank.items():
+        t = "LCL used"  if isinstance(snd, lcl.ExSound) else ""
+        t +=  " " + str(snd.__class__)
+        s += "sound({}): {}\n".format(key, t)
+    return s
 
 # ---------------------------------------------------------
 # Extended Audio function
@@ -1139,7 +1162,7 @@ def play_voice_str(fmt_str, ch_id=0):
     v.set_by_str(fmt_str)
     lcl.play_voice(v, ch_id=ch_id)
 
-def sfx(ch_id=0):
+def sfx(ch_id=SFX_DEFAULT_CH):
     pyxel.play(ch_id, pyxel.SOUND_BANK_FOR_SYSTEM, loop=False)
 
 def sfx_str(fmt_str):
@@ -1254,11 +1277,13 @@ def mixing_bar_sound(bar):
     return limited_output_stack
 
 
-def _get_start_index_for_tail(load_channels=4, load_pages=16):
-    return pyxel.USER_SOUND_BANK_COUNT - (load_channels * load_pages)
+def _get_start_index_for_tail(load_channels=4, load_pages=16, start_bar=0):
+    return pyxel.USER_SOUND_BANK_COUNT - (load_channels * load_pages )# - start_bar * load_channels
 
 
 def update_note_mixing(load_channels=4, load_pages=16, load_to_tail=True, channel_compress=False):
+
+    lcl.used_sound_list.clear()
 
     for h in range(0, load_pages):
         str_notes   = ["","","",""]
@@ -1296,25 +1321,43 @@ def update_note_mixing(load_channels=4, load_pages=16, load_to_tail=True, channe
                 snd_idx += _get_start_index_for_tail(load_channels, load_pages)
             debug("snd_idx: %d", snd_idx )
             lcl.sound(snd_idx).set(str_notes[i], str_tones[i], str_volumes[i], str_effects[i], lcm.speed)
+            lcl.used_sound_list.append(snd_idx)
 
 
-def load_lcmusic(lcm_index:int, load_channels=4, load_pages=16, load_to_tail=True, channel_compress=False):
-    global loaded_lcmusic_index
+def load_lcm_from_lcd(lcm_index):
     global lcm
+    lcm = lcd[lcm_index]
 
+
+def load_lcmusic(lcm_index:int, load_channels=4, load_pages=16, load_to_tail=True, channel_compress=False, load_to_lcm=True):
+    global lcm
+    global loaded_lcmusic_index
+    global loaded_channels
+    global loaded_pages
+    global loaded_to_tail
+
+    debug("lcl.load_lcmusic()")
     debug("load_sound len(lcd): " + str(len(lcd)))
 
     if lcm_index >= count_lcmusic() or lcm_index <= -1:
         error("lcmusic index is out of range")
         return False
     
-    lcm = lcd[lcm_index]
+    if load_to_lcm:
+        load_lcm_from_lcd(lcm_index)
+
     update_note_mixing(load_channels, load_pages, load_to_tail, channel_compress)
     loaded_lcmusic_index = lcm_index
+    loaded_channels = load_channels
+    loaded_pages = load_pages
+    loaded_to_tail = load_to_tail
 
 
 def setup_music(music_id=7, bar:int=0, load_channels=4, load_pages=16, load_to_tail=True):
+    global music_play_start_bar
+    music_play_start_bar = bar
 
+    debug("lcl.setup_music()")
     debug("bar:%d load_channels:%d load_pages:%d", bar, load_channels, load_pages)
     m = lcl.music(music_id)
 
@@ -1339,7 +1382,6 @@ def setup_music(music_id=7, bar:int=0, load_channels=4, load_pages=16, load_to_t
         m.set(pl[0], pl[1], pl[2], pl[3])
         debug("%s",str(pl))
     
-    # loop play ----
     else:
         # sound play list by channel
         pl = [[] for i in range(4)]
@@ -1351,7 +1393,7 @@ def setup_music(music_id=7, bar:int=0, load_channels=4, load_pages=16, load_to_t
         end_bar_idx = (lcm.loop_end_bar+1) * load_channels + index_shift
 
         # calc loop start bar's sound index
-        loop_start_bar_idx = 0
+        loop_start_bar_idx = 0 + index_shift
         if lcm.loop_start_bar is not None:
             loop_start_bar_idx = lcm.loop_start_bar * load_channels + index_shift
         
@@ -1362,7 +1404,7 @@ def setup_music(music_id=7, bar:int=0, load_channels=4, load_pages=16, load_to_t
             pl[i] += list(range(bar_idx+i, end_bar_idx+i, load_channels))
 
         # after repeat loop /  near infinity times
-        for h in range(100):
+        for h in range(10):     # heavy if 100
             for i in range(load_channels):
                 pl[i] += range(loop_start_bar_idx+i, end_bar_idx, load_channels)
 
@@ -1371,17 +1413,21 @@ def setup_music(music_id=7, bar:int=0, load_channels=4, load_pages=16, load_to_t
 
 
 def setup_music_for_page_loop(music_id=7, bar:int=0, load_channels=4, load_to_tail=True):
+    global music_play_start_bar
+    music_play_start_bar = bar
+
     m = lcl.music(music_id)
 
     bar_idx = bar * load_channels
     if load_to_tail:
-        bar_idx += _get_start_index_for_tail(load_channels, 1)
+        bar_idx += _get_start_index_for_tail(load_channels, load_pages=16)
 
     debug("bar_idx:%d ", bar_idx)
 
     pl = [[] for i in range(4)]
     for i in range(load_channels):
-        pl[i] += list(bar_idx+i)
+        print(bar_idx+i)
+        pl[i].append(bar_idx+i)
         
     debug("%s",str(pl))
     m.set(pl[0], pl[1], pl[2], pl[3])
@@ -1392,7 +1438,7 @@ def stop_channels(load_channels=4):
         pyxel.stop(i)
 
 
-def play_page_loop(lcm_index:int=0, start_bar:int=0, music_id:int=7, load_channels=4, load_to_tail=True, channel_compress=False):
+def play_page_loop(lcm_index:int=0, start_bar:int=0, music_id:int=7, load_channels=4, load_to_tail=True, channel_compress=False, load_to_lcm=True):
     
     if lcm_index >= count_lcmusic() or lcm_index <= -1:
         error("lcmusic index is out of range")
@@ -1400,27 +1446,34 @@ def play_page_loop(lcm_index:int=0, start_bar:int=0, music_id:int=7, load_channe
     
     #stop_channels(load_channels)
     pyxel.stop()
-    
-    load_lcmusic(lcm_index, load_channels, load_to_tail, channel_compress)
+
+    load_lcmusic(lcm_index, load_channels, 16, load_to_tail, channel_compress, load_to_lcm=load_to_lcm)
     setup_music_for_page_loop(music_id, start_bar, load_channels, load_to_tail)
 
     pyxel.playm(music_id, loop=True)
+    global played_page_loop_setting
+    played_page_loop_setting = True
     return True
 
 
 def play(lcm_index:int, start_bar:int=0, loop:bool=False, music_id:int=7,
-         load_channels:int=4, load_pages:int=16, load_to_tail:bool=True, channel_compress:bool=False):
+         load_channels:int=4, load_pages:int=16, load_to_tail:bool=True, channel_compress:bool=False, load_to_lcm=True):
+
+    debug("lcl.play()")
 
     if lcm_index >= count_lcmusic() or lcm_index <= -1:
         error("lcmusic index is out of range")
         return False
 
     pyxel.stop()
-    
-    load_lcmusic(lcm_index, load_channels, load_pages, load_to_tail, channel_compress)
+
+    load_lcmusic(lcm_index, load_channels, load_pages, load_to_tail, channel_compress, load_to_lcm=load_to_lcm)
     setup_music(music_id, start_bar, load_channels, load_pages, load_to_tail)
 
     pyxel.playm(music_id, loop=loop)
+
+    global played_page_loop_setting
+    played_page_loop_setting = False
     return True
 
 
